@@ -1,0 +1,239 @@
+# -*- coding: utf-8 -*-
+#
+# Copyright 2022 dpa-IT Services GmbH
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+service: ${self:custom.global_resource_prefix}-${self:custom.component_name}
+
+custom:
+  component_name: dpa-s3push-to-wordpress  # CHANGE THIS!
+  global_resource_prefix: test  # CHANGE THIS!
+  description: "Send content received by dpa digitalwires s3push api to wordpress restapi"
+ 
+  # please adapt config
+  config:
+    # your receiving bucket name --
+    # bucket names are worldwide unique names
+    # please use lowercase alphanums only, no leading and trailing slashes
+    s3_bucket_name: dpa-s3push-mycompany-com-CHANGE-ME  # CHANGE THIS!
+    s3_prefix: incoming  # CHANGE THIS!
+
+    sns_s3push_incoming_topic_name: ${self:custom.global_resource_prefix}-dpa-s3push-incoming-sns # CHANGE THIS!
+    sqs_incoming_name: ${self:custom.global_resource_prefix}-s3push-incoming-sqs  # CHANGE THIS!
+
+    # WARNING: To increase the security of your website you should consider
+    # saving these credentials to the AWS Systems Manager or
+    # another safe location of your choice instead of having them deployed as
+    # environment variables with the lambda function.
+    wp_url: "http://<WORDPRESS_HOST>/wp-json"  # CHANGE THIS!
+    wp_username: dpa-importer
+    wp_password: <APPLICATION_PASSWORD>  # CHANGE THIS!
+    
+    default_post_status: draft   # publish | draft | ...
+
+    # for testing only: accepting self-signed certs of wordpress development installations
+    # NODE_TLS_REJECT_UNAUTHORIZED: 0
+
+provider:
+  name:    aws
+  runtime: nodejs16.x
+  stage:   ${opt:stage, "dev"}  # CHANGE THIS!
+  region:  eu-central-1
+  logRetentionInDays: 30
+
+  # TODO: create deployment bucket or comment the deploymentBucket with results in a default deployment bucket
+  # aws s3api create-bucket --bucket <deploymentBucketName> --region eu-central-1 --create-bucket-configuration LocationConstraint=eu-central-1
+  deploymentBucket: <DEPLOYMENT_BUCKET_NAME>  # CHANGE THIS!
+
+  iamRoleStatements:
+    # attach function to bucket
+    -  Effect: "Allow"
+       Action: "s3:PutBucketNotification"
+       Resource: "arn:aws:s3:::${self:custom.config.s3_bucket_name}"
+    # read from bucket 
+    - Effect: "Allow"
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::${self:custom.config.s3_bucket_name}/${self:custom.config.s3_prefix}/*" 
+
+functions:
+  handler:
+    description: "forward incoming content to wordpress restapi"
+    handler: handler.handler
+    memorySize: 256
+    timeout: 15
+    reservedConcurrency: 2
+    environment: ${self:custom.config}
+    events:
+      - sqs:
+          arn: {"Fn::GetAtt": ["S3PushIncomingQueue", "Arn"]}
+          batchSize: 1
+
+resources:
+  Description: ${self:custom.description}
+  Resources:
+    S3PushAccessKey:
+      Type: AWS::IAM::AccessKey
+      Properties:
+        UserName: {"Ref": "S3PushUser"}
+    S3PushUser:
+      Type: AWS::IAM::User
+      Properties:
+        Path: "/"
+        Policies:
+ 
+        - PolicyName: S3PushUserAccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: "Allow"
+              Action:
+                - "s3:GetObject"
+                - "s3:PutObject"
+              Resource: "arn:aws:s3:::${self:custom.config.s3_bucket_name}/${self:custom.config.s3_prefix}/*"
+            - Effect: "Allow"
+              Action:
+                - "s3:GetBucketLocation"
+              Resource: "arn:aws:s3:::${self:custom.config.s3_bucket_name}"
+            - Effect: "Allow"
+              Action: s3:ListBucket
+              Condition: 
+                StringLike: 
+                  "s3:prefix": "${self:custom.config.s3_prefix}/*"
+              Resource: "arn:aws:s3:::${self:custom.config.s3_bucket_name}"
+
+    # topic for incoming dpa content (.json)
+    S3PushIncomingTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:custom.config.sns_s3push_incoming_topic_name}
+
+    S3PushIncomingTopicPolicy:
+      Type: AWS::SNS::TopicPolicy
+      Properties:
+        Topics:
+        - Ref: S3PushIncomingTopic
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: AllowS3PushBucketToPublishToQueue
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sns:Publish
+            Resource:
+              Ref: S3PushIncomingTopic
+            Condition:
+              ArnLike:
+                "aws:SourceArn": "arn:aws:s3:*:*:${self:custom.config.s3_bucket_name}"
+
+    # read this queue to get a stream of incoming articles 
+    S3PushIncomingQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        DelaySeconds: 0
+        MaximumMessageSize: 262144
+        MessageRetentionPeriod: 864000
+        QueueName: ${self:custom.config.sqs_incoming_name}
+        ReceiveMessageWaitTimeSeconds: 0
+        VisibilityTimeout: 90
+        #RedrivePolicy:
+        #  deadLetterTargetArn: !GetAtt FailureQueue.Arn
+        #  maxReceiveCount: 10
+
+    SnsToSqsIncomingSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: {"Fn::Join": ["", ["arn:aws:sns:", {"Ref": "AWS::Region"}, ":", {"Ref": "AWS::AccountId"}, ":${self:custom.config.sns_s3push_incoming_topic_name}"]]}
+        Endpoint: 
+          Fn::GetAtt: [S3PushIncomingQueue, Arn]
+        Protocol: sqs
+        RawMessageDelivery: true
+
+    # Policy allows SNS to publish to this SQS queue
+    IncomingSnsToSqsPolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: "Allow SNS publish to SQS"
+              Effect: Allow
+              Principal: 
+                Service: "sns.amazonaws.com"
+              Resource: {"Fn::Join": ["", ["arn:aws:sqs:", {"Ref": "AWS::Region"}, ":", {"Ref": "AWS::AccountId"}, ":${self:custom.config.sqs_incoming_name}"]]}
+              Action: SQS:SendMessage
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: {"Fn::Join": ["", ["arn:aws:sns:", {"Ref": "AWS::Region"}, ":", {"Ref": "AWS::AccountId"}, ":${self:custom.config.sns_s3push_incoming_topic_name}"]]}
+        Queues:
+          - Ref: S3PushIncomingQueue
+
+    S3PushBucket:
+      Type: AWS::S3::Bucket
+      DependsOn:
+        - S3PushIncomingTopic
+        - S3PushIncomingTopicPolicy
+      Properties:
+        BucketName: ${self:custom.config.s3_bucket_name}
+        AccessControl: Private
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          IgnorePublicAcls: true
+          BlockPublicPolicy: true
+          RestrictPublicBuckets: true
+        VersioningConfiguration:
+          Status: Enabled
+        LifecycleConfiguration:
+          Rules:
+            - Id: delete-incoming-after-30-days 
+              ExpirationInDays: 30
+              Prefix: ${self:custom.config.s3_prefix}/
+              Status: Enabled
+        CorsConfiguration:
+          CorsRules:
+            -
+              AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - HEAD
+              MaxAge: 3000
+        NotificationConfiguration:
+          TopicConfigurations:
+            - Event: s3:ObjectCreated:*
+              Filter:
+                S3Key:
+                  Rules:
+                    - Name: Prefix
+                      Value: "${self:custom.config.s3_prefix}"
+                    - Name: Suffix
+                      Value: .json
+              Topic:
+                Ref: S3PushIncomingTopic
+
+  Outputs:
+    S3PushUrlPrefix:
+      Value: {"Fn::Join": ["", ["s3://", { "Ref" : "S3PushBucket" }, "/${self:custom.config.s3_prefix}"]]}
+    S3PushAccessKeyId:
+      Value: {"Ref": "S3PushAccessKey"}
+    S3PushSecretAccessKey:
+      Value: {"Fn::GetAtt": [ "S3PushAccessKey", "SecretAccessKey" ] }
+
+package:
+  patterns:
+    - "!package.json"
+    - "!*lock*"
+    - "handler.js"
