@@ -1,6 +1,20 @@
 # s3push-to-wordpress
 
-[[_TOC_]]
+* [Installation](#installation)
+* [Installation of additional plugins](#installation-of-additional-plugins)
+    + [WP REST API - Filter parameter for posts endpoints](#wp-rest-api---filter-parameter-for-posts-endpoints)
+    + [Application Passwords](#application-passwords)
+    + [Webserver Configuration](#webserver-configuration)
+* [Add new user](#add-new-user)
+* [Requirements](#requirements)
+    + [NodeJS](#nodejs)
+    + [How to install nodejs and yarn on debian](#how-to-install-nodejs-and-yarn-on-debian)
+    + [AWS Credentials](#aws-credentials)
+* [Setup s3push](#setup-s3push)
+    + [Short instructions](#short-instructions)
+    + [Instructions](#instructions)
+* [Access to the data](#access-to-the-data)
+* [Deinstallation](#deinstallation)
 
 ## Installation
 
